@@ -1164,6 +1164,7 @@
 
 .settings-provider-card {
     display: flex;
+    flex-direction: column;
     align-items: center;
     gap: 12px;
     padding: 10px 12px;
@@ -1186,6 +1187,7 @@
     align-items: center;
     gap: 6px;
     min-width: 0;
+    width: 100%;
     flex: 1;
 }
 
@@ -1433,6 +1435,8 @@
 /* ── Provider setup form ─────────────────────────────────────── */
 
 .settings-provider-setup {
+    box-sizing: border-box;
+    width: 100%;
     padding: 8px 12px 4px;
     border-top: 1px solid var(--border-color, rgba(128,128,128,0.15));
     display: flex;
