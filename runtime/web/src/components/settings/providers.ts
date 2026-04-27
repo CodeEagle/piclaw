@@ -2,13 +2,53 @@
 import { html, useState, useCallback } from '../../vendor/preact-htm.js';
 import { sendAgentMessage } from '../../api.js';
 
+const HTTP_URL_RE = /(https?:\/\/[^\s)]+)/;
+
+function extractHttpUrl(value) {
+    if (typeof value !== 'string') return null;
+    const match = value.match(HTTP_URL_RE);
+    return match ? match[1] : null;
+}
+
+function findOAuthUrl(value, seen = new Set()) {
+    if (!value) return null;
+    if (typeof value === 'string') return extractHttpUrl(value);
+    if (typeof value !== 'object') return null;
+    if (seen.has(value)) return null;
+    seen.add(value);
+
+    if (Array.isArray(value)) {
+        for (const item of value) {
+            const found = findOAuthUrl(item, seen);
+            if (found) return found;
+        }
+        return null;
+    }
+
+    if (value.type === 'Action.OpenUrl' && typeof value.url === 'string') {
+        return value.url;
+    }
+
+    for (const key of ['actions', 'payload', 'contentBlocks', 'fallback_text', 'message', 'url']) {
+        const found = findOAuthUrl(value[key], seen);
+        if (found) return found;
+    }
+
+    return null;
+}
+
 export function ProvidersSection({ providers, setStatus }) {
     const [busy, setBusy] = useState(null);
     const [expandedProvider, setExpandedProvider] = useState(null);
     const [formData, setFormData] = useState({});
+    const [oauthRedirects, setOauthRedirects] = useState({});
 
     const updateForm = useCallback((key, value) => {
         setFormData(prev => ({ ...prev, [key]: value }));
+    }, []);
+
+    const updateOAuthRedirect = useCallback((providerId, value) => {
+        setOauthRedirects(prev => ({ ...prev, [providerId]: value }));
     }, []);
 
     const setupApiKey = useCallback(async (providerId) => {
@@ -49,25 +89,64 @@ export function ProvidersSection({ providers, setStatus }) {
     const startOAuth = useCallback(async (providerId) => {
         setBusy(providerId);
         setStatus?.(`Starting OAuth for ${providerId}…`, 'info');
+        let popup = null;
         try {
-            const payload = JSON.stringify({ provider: providerId });
-            const resp = await sendAgentMessage('default', `/login __step1 ${payload}`, null, []);
+            popup = window.open('', '_blank');
+            if (popup) popup.opener = null;
+        } catch {
+            popup = null;
+        }
+        try {
+            const payload = JSON.stringify({ provider: providerId, action: 'oauth' });
+            const resp = await sendAgentMessage('default', `/login __step1method ${payload}`, null, []);
+            if (resp?.command?.status === 'error') {
+                if (popup && !popup.closed) popup.close();
+                setStatus?.(resp.command.message, 'error');
+                return;
+            }
+
             const msg = resp?.command?.message || '';
-            if (msg.includes('http')) {
-                // Extract URL from message
-                const urlMatch = msg.match(/(https?:\/\/[^\s)]+)/);
-                if (urlMatch) {
-                    window.open(urlMatch[1], '_blank', 'noopener');
-                    setStatus?.('OAuth window opened. Complete the sign-in flow, then close this message.', 'success');
+            const oauthUrl = findOAuthUrl(resp?.command) || findOAuthUrl(resp);
+            if (oauthUrl) {
+                if (popup && !popup.closed) {
+                    popup.location.href = oauthUrl;
                 } else {
-                    setStatus?.(msg, 'success');
+                    window.open(oauthUrl, '_blank', 'noopener');
                 }
+                setStatus?.('OAuth window opened. Complete the sign-in flow, then use Check to finish.', 'success');
             } else {
+                if (popup && !popup.closed) popup.close();
                 setStatus?.(msg || `OAuth flow started for ${providerId}. Check the chat.`, 'success');
             }
-        } catch (e) { setStatus?.(String(e.message || e), 'error'); }
+        } catch (e) {
+            if (popup && !popup.closed) popup.close();
+            setStatus?.(String(e.message || e), 'error');
+        }
         finally { setBusy(null); }
     }, [setStatus]);
+
+    const checkOAuth = useCallback(async (providerId) => {
+        if (busy) return;
+        setBusy(providerId);
+        setStatus?.(`Checking OAuth for ${providerId}…`, 'info');
+        try {
+            const payload = JSON.stringify({
+                provider: providerId,
+                method: 'oauth_check',
+                redirect_url: (oauthRedirects[providerId] || '').trim(),
+            });
+            const resp = await sendAgentMessage('default', `/login __step2 ${payload}`, null, []);
+            if (resp?.command?.status === 'error') { setStatus?.(resp.command.message, 'error'); return; }
+            setStatus?.(resp?.command?.message || `${providerId} OAuth configured.`, 'success');
+            setExpandedProvider(null);
+            setOauthRedirects(prev => {
+                const next = { ...prev };
+                delete next[providerId];
+                return next;
+            });
+        } catch (e) { setStatus?.(String(e.message || e), 'error'); }
+        finally { setBusy(null); }
+    }, [busy, oauthRedirects, setStatus]);
 
     const logout = useCallback(async (providerId) => {
         if (busy) return;
@@ -124,6 +203,17 @@ export function ProvidersSection({ providers, setStatus }) {
                                             onClick=${() => startOAuth(p.id)}>
                                             ${busy === p.id ? 'Starting…' : 'Sign in with OAuth'}
                                         </button>
+                                        <div class="settings-row" style="margin-top:6px;margin-bottom:6px">
+                                            <label>Redirect URL</label>
+                                            <input type="text" value=${oauthRedirects[p.id] || ''}
+                                                onInput=${e => updateOAuthRedirect(p.id, e.target.value)}
+                                                placeholder="Paste redirect URL after sign-in, if needed" />
+                                            <button class="settings-addon-btn"
+                                                disabled=${busy === p.id}
+                                                onClick=${() => checkOAuth(p.id)}>
+                                                ${busy === p.id ? 'Checking…' : 'Check'}
+                                            </button>
+                                        </div>
                                     </div>
                                 `}
                                 ${p.hasApiKey && html`
